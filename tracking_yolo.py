@@ -1,9 +1,15 @@
 import cv2
 from ultralytics import YOLO
+import time
 
 # ─── DETECTION LAYER ───
 model = YOLO('yolov8n.pt')
 CONF = 0.5
+
+# ─── FPS TRACKING ───
+frame_count = 0
+fps_start = time.time()
+FPS = 0
 
 # ─── FLAG RULES ───
 # Classes to FLAG (alert): 2=car, 3=motorcycle, 7=truck
@@ -59,6 +65,11 @@ while cap.isOpened():
     # ─── DETECT ───
     results = model(frame, conf=CONF, verbose=False)
 
+    # ─── FPS CALCULATION ───
+    frame_count += 1
+    current_fps = frame_count / (time.time() - fps_start)
+    FPS = current_fps
+
     # Convert YOLO boxes → (x, y, w, h, class)
     dets = []
     for box in results[0].boxes:
@@ -108,6 +119,10 @@ while cap.isOpened():
         if tr['cls'] in FLAG_CLASSES:
             cv2.putText(frame, '!! FLAG !!', (x, y + h + 15),
                         cv2.FONT_HERSHEY_SIMPLEX, 0.5, color, 1)
+
+    # ─── DRAW FPS ───
+    cv2.putText(frame, f'FPS: {FPS:.1f}', (10, 30),
+                cv2.FONT_HERSHEY_SIMPLEX, 0.5, (255, 255, 255), 1)
 
     cv2.imshow('YOLO Tracking', frame)
     if cv2.waitKey(1) & 0xFF == ord('q'):
