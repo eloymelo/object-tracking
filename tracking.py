@@ -1,8 +1,7 @@
 import cv2
 
 # Load model
-cascade_path = 'haarcascade_frontalface_default.xml'
-face_cascade = cv2.CascadeClassifier(cascade_path)
+face_cascade = cv2.CascadeClassifier(cv2.data.haarcascades + "haarcascade_frontalface_default.xml")
 
 # Tracking state
 next_id = 0
