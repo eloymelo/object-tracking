@@ -1,5 +1,5 @@
-from dataclasses import dataclass, field
-from typing import List, Optional
+from dataclasses import dataclass
+from typing import List
 from .iou import iou
 
 
@@ -25,6 +25,7 @@ class GreedyTracker:
         matched_tracks = set()
         matched_dets = set()
 
+        # Match detections to existing tracks
         for i, det in enumerate(zip(boxes, classes)):
             if i in matched_dets:
                 continue
@@ -45,16 +46,9 @@ class GreedyTracker:
                 matched_tracks.add(best_t.id)
                 matched_dets.add(i)
 
-        # New tracks for unmatched detections
-        for i, (det_box, det_cls) in enumerate(zip(boxes, classes)):
-            if i not in matched_dets:
-                self.tracks.append(
-                    Track(id=self.next_id, box=det_box, cls=det_cls, hits=1, age=0)
-                )
-                self.next_id += 1
+        updated: list[Track] = []
 
-        # Age unmatched existing tracks
-        updated = []
+        # Keep re-matched or aged tracks
         for t in prev:
             if t.id in matched_tracks:
                 updated.append(t)
@@ -63,7 +57,13 @@ class GreedyTracker:
                 if t.age <= self.max_age:
                     updated.append(t)
 
-        self.tracks = updated
+        # Spawn new tracks for unmatched detections
+        for i, (det_box, det_cls) in enumerate(zip(boxes, classes)):
+            if i not in matched_dets:
+                updated.append(
+                    Track(id=self.next_id, box=det_box, cls=det_cls, hits=1, age=0)
+                )
+                self.next_id += 1
 
-        # Only return tracks confirmed by min_hits
+        self.tracks = updated
         return [t for t in self.tracks if t.hits >= self.min_hits]
