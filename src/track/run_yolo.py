@@ -163,7 +163,7 @@ def _parse_args():
     p = argparse.ArgumentParser(description="Track objects with YOLOv8 + greedy IoU.")
     p.add_argument("--source", type=str, default="1", help="Camera index or video file path")
     p.add_argument("--conf", type=float, default=0.5, help="Detection confidence threshold")
-    p.add_argument("--iou", type=float, default=0.3, help="Iou threshold for matching")
+    p.add_argument("--iou", type=float, default=0.3, help="IoU threshold for matching")
     p.add_argument("--max-age", type=int, default=10, help="Frames to keep a lost track")
     return p.parse_args()
 
