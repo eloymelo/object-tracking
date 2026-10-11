@@ -1,6 +1,10 @@
+# src/track/run_yolo.py
 import argparse
 import cv2
 import time
+import numpy as np
+from track.metrics import Perf
+from track.tracker.hungarian import HungarianTracker
 
 
 FLAG_CLASSES = {2, 3, 7}  # car, motorcycle, truck
@@ -25,34 +29,20 @@ def get_label(model, cls):
     return model.names[int(cls)]
 
 
-def iou(box1, box2):
-    x1, y1, w1, h1 = box1
-    x2, y2, w2, h2 = box2
-    ox1, oy1 = max(x1, x2), max(y1, y2)
-    ox2, oy2 = min(x1 + w1, x2 + w2), min(y1 + h1, y2 + h2)
-    if ox2 <= ox1 or oy2 <= oy1:
-        return 0.0
-    overlap = (ox2 - ox1) * (oy2 - oy1)
-    union = w1 * h1 + w2 * h2 - overlap
-    return overlap / union
-
-
 def main(
     source: str = "1",
     conf: float = 0.5,
     iou_thresh: float = 0.3,
     max_age: int = 10,
+    min_hits: int = 3,
 ) -> None:
     from ultralytics import YOLO
 
     model = YOLO("yolov8n.pt")
-
-    next_id = 0
-    tracks = {}
-
-    frame_count = 0
-    fps_start = time.time()
-    FPS = 0.0
+    tracker = HungarianTracker(
+        iou_thresh=iou_thresh, max_age=max_age, min_hits=min_hits
+    )
+    perf = Perf(warmup=30)
 
     if source.isdigit():
         cap = cv2.VideoCapture(int(source))
@@ -64,73 +54,44 @@ def main(
         if not success:
             break
 
-        # DETECT
-        results = model(frame, conf=conf, verbose=False)
+        # Inference timing (render excluded)
+        t0 = time.perf_counter()
+        results = model(frame, conf=conf, verbose=False)[0]
+        t1 = time.perf_counter()
 
-        # FPS
-        frame_count += 1
-        FPS = frame_count / (time.time() - fps_start)
+        # Batch-convert YOLO boxes to xywh
+        if results.boxes is not None and len(results.boxes):
+            xyxy = results.boxes.xyxy.cpu().numpy()
+            dets_cls = results.boxes.cls.cpu().numpy().astype(int)
+            dets_box = np.column_stack([
+                xyxy[:, 0],
+                xyxy[:, 1],
+                xyxy[:, 2] - xyxy[:, 0],
+                xyxy[:, 3] - xyxy[:, 1],
+            ]).astype(np.float32)
+        else:
+            dets_box = np.zeros((0, 4), dtype=np.float32)
+            dets_cls = np.zeros(0, dtype=int)
 
-        # Convert YOLO boxes to xywh
-        dets = []
-        for box in results[0].boxes:
-            x1, y1, x2, y2 = box.xyxy[0].cpu().tolist()
-            cls = int(box.cls[0])
-            dets.append((x1, y1, x2 - x1, y2 - y1, cls))
+        tracks = tracker.update(dets_box, dets_cls)
 
-        # MATCHING
-        matched_ids = set()
-        for det in dets:
-            x, y, w, h, cls = det
-            best_iou, best_id = 0.0, -1
-            for tid, tr in tracks.items():
-                score = iou((x, y, w, h), (tr["x"], tr["y"], tr["w"], tr["h"]))
-                if score > best_iou:
-                    best_iou, best_id = score, tid
-            if best_iou > iou_thresh:
-                tracks[best_id].update(x=x, y=y, w=w, h=h, age=0, cls=cls)
-                matched_ids.add(best_id)
-            else:
-                next_id += 1
-                tracks[next_id] = {
-                    "x": x,
-                    "y": y,
-                    "w": w,
-                    "h": h,
-                    "age": 0,
-                    "cls": cls,
-                }
-                matched_ids.add(next_id)
-
-        # AGING
-        for tid in tracks:
-            if tid not in matched_ids:
-                tracks[tid]["age"] += 1
-
-        # DELETE
-        to_delete = [t for t, tr in tracks.items() if tr["age"] > max_age]
-        for tid in to_delete:
-            del tracks[tid]
-
-        # DRAW
-        for tid, tr in tracks.items():
-            x, y = int(tr["x"]), int(tr["y"])
-            w, h = int(tr["w"]), int(tr["h"])
-            color = get_color(tr["cls"])
-            label = get_label(model, tr["cls"])
+        # Draw tracks
+        for t in tracks:
+            x, y, w, h = map(int, t.box)
+            color = get_color(t.cls)
+            label = get_label(model, t.cls)
 
             cv2.rectangle(frame, (x, y), (x + w, y + h), color, 2)
             cv2.putText(
                 frame,
-                f"ID:{tid} {label}",
+                f"ID:{t.id} {label}",
                 (x, y - 5),
                 cv2.FONT_HERSHEY_SIMPLEX,
                 0.5,
                 color,
                 1,
             )
-
-            if tr["cls"] in FLAG_CLASSES:
+            if t.cls in FLAG_CLASSES:
                 cv2.putText(
                     frame,
                     "!! FLAG !!",
@@ -141,9 +102,16 @@ def main(
                     1,
                 )
 
+        # Full-loop timing (includes drawing + imshow)
+        t2 = time.perf_counter()
+        perf.record(t1 - t0, t2 - t0)
+
+        stats = perf.stats()
+        fps = stats.get("fps_render", 0.0)
+        infer_ms = stats.get("infer_p50_ms", 0.0)
         cv2.putText(
             frame,
-            f"FPS: {FPS:.1f}",
+            f"FPS: {fps:.1f} infer={infer_ms:.1f}ms",
             (10, 30),
             cv2.FONT_HERSHEY_SIMPLEX,
             0.5,
@@ -160,11 +128,12 @@ def main(
 
 
 def _parse_args():
-    p = argparse.ArgumentParser(description="Track objects with YOLOv8 + greedy IoU.")
+    p = argparse.ArgumentParser(description="Track objects with YOLOv8 + Hungarian IoU.")
     p.add_argument("--source", type=str, default="1", help="Camera index or video file path")
     p.add_argument("--conf", type=float, default=0.5, help="Detection confidence threshold")
     p.add_argument("--iou", type=float, default=0.3, help="IoU threshold for matching")
     p.add_argument("--max-age", type=int, default=10, help="Frames to keep a lost track")
+    p.add_argument("--min-hits", type=int, default=3, help="Frames before a track is reported")
     return p.parse_args()
 
 
@@ -175,4 +144,5 @@ if __name__ == "__main__":
         conf=args.conf,
         iou_thresh=args.iou,
         max_age=args.max_age,
+        min_hits=args.min_hits,
     )
