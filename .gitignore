@@ -1,3 +1,27 @@
+# Python artifacts
 __pycache__/
-*.pyc
+*.py[cod]
+
+# macOS
 .DS_Store
+
+# Model weights — fetched at runtime, never committed
+*.pt
+*.onnx
+*.engine
+
+# Vendored OpenCV data — loaded via cv2.data.haarcascades
+haarcascade_*.xml
+
+# Media artifacts (README GIFs live under docs/)
+*.mp4
+*.avi
+*.mov
+*.gif
+!docs/**/*.gif
+
+# Packaging / virtualenv
+dist/
+build/
+*.egg-info/
+.venv/
