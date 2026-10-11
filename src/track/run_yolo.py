@@ -2,45 +2,27 @@ import cv2
 from ultralytics import YOLO
 import time
 
-# ─── DETECTION LAYER ───
-model = YOLO('yolov8n.pt')
-CONF = 0.5
 
-# ─── FPS TRACKING ───
-frame_count = 0
-fps_start = time.time()
-FPS = 0
-
-# ─── FLAG RULES ───
-# Classes to FLAG (alert): 2=car, 3=motorcycle, 7=truck
-FLAG_CLASSES = {2, 3, 7}
-# Class for person: 0
+FLAG_CLASSES = {2, 3, 7}  # car, motorcycle, truck
 PERSON_CLASS = 0
 
-# Color map
 COLORS = {
-    'flag':    (0, 0, 255),    # RED   — car/motorcycle/truck
-    'person':  (0, 255, 0),    # GREEN — person
-    'default': (255, 0, 0),    # BLUE  — everything else
+    "flag": (0, 0, 255),     # RED
+    "person": (0, 255, 0),   # GREEN
+    "default": (255, 0, 0),  # BLUE
 }
 
 
 def get_color(cls):
     if cls in FLAG_CLASSES:
-        return COLORS['flag']
-    elif cls == PERSON_CLASS:
-        return COLORS['person']
-    else:
-        return COLORS['default']
+        return COLORS["flag"]
+    if cls == PERSON_CLASS:
+        return COLORS["person"]
+    return COLORS["default"]
 
 
-def get_label(cls):
-    return model.names[int(cls)]  # e.g. "car", "person"
-
-
-# ─── TRACKING STATE ───
-next_id = 0
-tracks = {}
+def get_label(model, cls):
+    return model.names[int(cls)]
 
 
 def iou(box1, box2):
@@ -55,78 +37,122 @@ def iou(box1, box2):
     return overlap / union
 
 
-cap = cv2.VideoCapture(1)
+def main(
+    camera_index: int = 1,
+    conf: float = 0.5,
+    iou_thresh: float = 0.3,
+    max_age: int = 10,
+) -> None:
+    model = YOLO("yolov8n.pt")
 
-while cap.isOpened():
-    success, frame = cap.read()
-    if not success:
-        break
+    next_id = 0
+    tracks = {}
 
-    # ─── DETECT ───
-    results = model(frame, conf=CONF, verbose=False)
+    frame_count = 0
+    fps_start = time.time()
+    FPS = 0.0
 
-    # ─── FPS CALCULATION ───
-    frame_count += 1
-    current_fps = frame_count / (time.time() - fps_start)
-    FPS = current_fps
+    cap = cv2.VideoCapture(camera_index)
 
-    # Convert YOLO boxes → (x, y, w, h, class)
-    dets = []
-    for box in results[0].boxes:
-        x1, y1, x2, y2 = box.xyxy[0].cpu().tolist()
-        cls = int(box.cls[0])
-        dets.append((x1, y1, x2 - x1, y2 - y1, cls))
+    while cap.isOpened():
+        success, frame = cap.read()
+        if not success:
+            break
 
-    # ─── MATCHING ───
-    matched_ids = set()
-    for det in dets:
-        x, y, w, h, cls = det
-        best_iou, best_id = 0.0, -1
+        # DETECT
+        results = model(frame, conf=conf, verbose=False)
+
+        # FPS
+        frame_count += 1
+        FPS = frame_count / (time.time() - fps_start)
+
+        # Convert YOLO boxes to xywh
+        dets = []
+        for box in results[0].boxes:
+            x1, y1, x2, y2 = box.xyxy[0].cpu().tolist()
+            cls = int(box.cls[0])
+            dets.append((x1, y1, x2 - x1, y2 - y1, cls))
+
+        # MATCHING
+        matched_ids = set()
+        for det in dets:
+            x, y, w, h, cls = det
+            best_iou, best_id = 0.0, -1
+            for tid, tr in tracks.items():
+                score = iou((x, y, w, h), (tr["x"], tr["y"], tr["w"], tr["h"]))
+                if score > best_iou:
+                    best_iou, best_id = score, tid
+            if best_iou > iou_thresh:
+                tracks[best_id].update(x=x, y=y, w=w, h=h, age=0, cls=cls)
+                matched_ids.add(best_id)
+            else:
+                next_id += 1
+                tracks[next_id] = {
+                    "x": x,
+                    "y": y,
+                    "w": w,
+                    "h": h,
+                    "age": 0,
+                    "cls": cls,
+                }
+                matched_ids.add(next_id)
+
+        # AGING
+        for tid in tracks:
+            if tid not in matched_ids:
+                tracks[tid]["age"] += 1
+
+        # DELETE
+        to_delete = [t for t, tr in tracks.items() if tr["age"] > max_age]
+        for tid in to_delete:
+            del tracks[tid]
+
+        # DRAW
         for tid, tr in tracks.items():
-            score = iou((x, y, w, h), (tr['x'], tr['y'], tr['w'], tr['h']))
-            if score > best_iou:
-                best_iou, best_id = score, tid
-        if best_iou > 0.3:
-            tracks[best_id].update(x=x, y=y, w=w, h=h, age=0, cls=cls)
-            matched_ids.add(best_id)
-        else:
-            next_id += 1
-            tracks[next_id] = {'x': x, 'y': y, 'w': w, 'h': h, 'age': 0, 'cls': cls}
-            matched_ids.add(next_id)
+            x, y = int(tr["x"]), int(tr["y"])
+            w, h = int(tr["w"]), int(tr["h"])
+            color = get_color(tr["cls"])
+            label = get_label(model, tr["cls"])
 
-    # ─── AGING ───
-    for tid in tracks:
-        if tid not in matched_ids:
-            tracks[tid]['age'] += 1
+            cv2.rectangle(frame, (x, y), (x + w, y + h), color, 2)
+            cv2.putText(
+                frame,
+                f"ID:{tid} {label}",
+                (x, y - 5),
+                cv2.FONT_HERSHEY_SIMPLEX,
+                0.5,
+                color,
+                1,
+            )
 
-    # ─── DELETE (fixed) ───
-    to_delete = [t for t, tr in tracks.items() if tr['age'] > 10]
-    for tid in to_delete:
-        del tracks[tid]
+            if tr["cls"] in FLAG_CLASSES:
+                cv2.putText(
+                    frame,
+                    "!! FLAG !!",
+                    (x, y + h + 15),
+                    cv2.FONT_HERSHEY_SIMPLEX,
+                    0.5,
+                    color,
+                    1,
+                )
 
-    # ─── DRAW ───
-    for tid, tr in tracks.items():
-        x, y = int(tr['x']), int(tr['y'])
-        w, h = int(tr['w']), int(tr['h'])
-        color = get_color(tr['cls'])
-        label = get_label(tr['cls'])
+        cv2.putText(
+            frame,
+            f"FPS: {FPS:.1f}",
+            (10, 30),
+            cv2.FONT_HERSHEY_SIMPLEX,
+            0.5,
+            (255, 255, 255),
+            1,
+        )
 
-        cv2.rectangle(frame, (x, y), (x + w, y + h), color, 2)
-        cv2.putText(frame, f'ID:{tid} {label}', (x, y - 5),
-                    cv2.FONT_HERSHEY_SIMPLEX, 0.5, color, 1)
+        cv2.imshow("YOLO Tracking", frame)
+        if cv2.waitKey(1) & 0xFF == ord("q"):
+            break
 
-        # Flag: extra "!" marker for cars
-        if tr['cls'] in FLAG_CLASSES:
-            cv2.putText(frame, '!! FLAG !!', (x, y + h + 15),
-                        cv2.FONT_HERSHEY_SIMPLEX, 0.5, color, 1)
+    cap.release()
+    cv2.destroyAllWindows()
 
-    # ─── DRAW FPS ───
-    cv2.putText(frame, f'FPS: {FPS:.1f}', (10, 30),
-                cv2.FONT_HERSHEY_SIMPLEX, 0.5, (255, 255, 255), 1)
 
-    cv2.imshow('YOLO Tracking', frame)
-    if cv2.waitKey(1) & 0xFF == ord('q'):
-        break
-
-cap.release()
-cv2.destroyAllWindows()
+if __name__ == "__main__":
+    main()
