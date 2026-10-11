@@ -1,5 +1,5 @@
+import argparse
 import cv2
-from ultralytics import YOLO
 import time
 
 
@@ -38,11 +38,13 @@ def iou(box1, box2):
 
 
 def main(
-    camera_index: int = 1,
+    source: str = "1",
     conf: float = 0.5,
     iou_thresh: float = 0.3,
     max_age: int = 10,
 ) -> None:
+    from ultralytics import YOLO
+
     model = YOLO("yolov8n.pt")
 
     next_id = 0
@@ -52,7 +54,10 @@ def main(
     fps_start = time.time()
     FPS = 0.0
 
-    cap = cv2.VideoCapture(camera_index)
+    if source.isdigit():
+        cap = cv2.VideoCapture(int(source))
+    else:
+        cap = cv2.VideoCapture(source)
 
     while cap.isOpened():
         success, frame = cap.read()
@@ -154,5 +159,20 @@ def main(
     cv2.destroyAllWindows()
 
 
+def _parse_args():
+    p = argparse.ArgumentParser(description="Track objects with YOLOv8 + greedy IoU.")
+    p.add_argument("--source", type=str, default="1", help="Camera index or video file path")
+    p.add_argument("--conf", type=float, default=0.5, help="Detection confidence threshold")
+    p.add_argument("--iou", type=float, default=0.3, help="Iou threshold for matching")
+    p.add_argument("--max-age", type=int, default=10, help="Frames to keep a lost track")
+    return p.parse_args()
+
+
 if __name__ == "__main__":
-    main()
+    args = _parse_args()
+    main(
+        source=args.source,
+        conf=args.conf,
+        iou_thresh=args.iou,
+        max_age=args.max_age,
+    )
