@@ -29,11 +29,3 @@ while cap.isOpened():
 
 cap.release()
 cv2.destroyAllWindows()
-
-from ultralytics import YOLO
-
-# Load a pre-trained YOLO model
-model = YOLO('yolov8n.pt')  # 'n' = nano (fastest, good for learning)
-
-# Detect
-results = model(frame)  # frame = BGR image from OpenCV
